@@ -1,0 +1,12 @@
+Python executable: C:\Users\vigne\AppData\Local\Programs\Python\Python311\python.exe
+Attempting imports...
+cv2 imported: 4.12.0
+2025-12-26 11:44:54.304689: I tensorflow/core/util/port.cc:113] oneDNN custom operations are on. You may see slightly different numerical results due to floating-point round-off errors from different computation orders. To turn them off, set the environment variable `TF_ENABLE_ONEDNN_OPTS=0`.
+WARNING:tensorflow:From C:\Users\vigne\AppData\Local\Programs\Python\Python311\Lib\site-packages\keras\src\losses.py:2976: The name tf.losses.sparse_softmax_cross_entropy is deprecated. Please use tf.compat.v1.losses.sparse_softmax_cross_entropy instead.
+
+mediapipe imported
+numpy imported
+pyttsx3 imported
+Attempting to open camera...
+Camera opened successfully
+Diagnosis complete.

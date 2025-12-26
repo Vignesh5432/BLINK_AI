@@ -1,0 +1,23 @@
+2025-12-26 11:46:35.792984: I tensorflow/core/util/port.cc:113] oneDNN custom operations are on. You may see slightly different numerical results due to floating-point round-off errors from different computation orders. To turn them off, set the environment variable `TF_ENABLE_ONEDNN_OPTS=0`.
+WARNING:tensorflow:From C:\Users\vigne\AppData\Local\Programs\Python\Python311\Lib\site-packages\keras\src\losses.py:2976: The name tf.losses.sparse_softmax_cross_entropy is deprecated. Please use tf.compat.v1.losses.sparse_softmax_cross_entropy instead.
+
+INFO: Created TensorFlow Lite XNNPACK delegate for CPU.
+System Started. Entering Calibration...
+Calibration Complete. New Threshold: 0.150
+Speaking: M
+Speaking: E
+Speaking: KE
+Speaking: E
+Speaking: E
+Speaking: EI
+Speaking: E
+Speaking: E
+Speaking: E
+Speaking: KT
+Speaking: 8
+Speaking: E
+Speaking: E
+Speaking: W
+Speaking: A
+Speaking: TEAG
+Speaking: E
