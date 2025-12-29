@@ -4,232 +4,249 @@ import numpy as np
 from config import (
     EAR_THRESHOLD_DEFAULT, BLINK_CONSEC_FRAMES, 
     DOT_DURATION_THRESHOLD, LETTER_PAUSE_THRESHOLD, 
-    WORD_PAUSE_THRESHOLD, CAMERA_ID, FRAME_WIDTH, FRAME_HEIGHT,
-    CALIBRATION_DURATION
+    WORD_PAUSE_THRESHOLD, CAMERA_ID, FRAME_WIDTH, FRAME_HEIGHT
 )
 from blink_detector import BlinkDetector
 from morse_logic import MorseDecoder
 from tts_engine import TTSEngine
-
-def draw_ui(frame, state, debug_info, decoder_data):
-    """
-    Draws the UI overlays on the frame.
-    state: 'CALIBRATION' or 'ACTIVE'
-    """
-    h, w, _ = frame.shape
-    
-    # Bottom Panel for Text
-    cv2.rectangle(frame, (0, h - 100), (w, h), (30, 30, 30), -1)
-    
-    if state == 'CALIBRATION':
-        # Top banner
-        cv2.rectangle(frame, (0, 0), (w, 60), (0, 100, 255), -1)
-        cv2.putText(frame, "CALIBRATION MODE", (10, 40), 
-                   cv2.FONT_HERSHEY_SIMPLEX, 1.0, (255, 255, 255), 2)
-        
-        # Instructions
-        time_left = debug_info.get('time_left', 0)
-        cv2.putText(frame, "Blink naturally...", (20, 100), 
-                   cv2.FONT_HERSHEY_SIMPLEX, 0.8, (0, 255, 255), 2)
-        cv2.putText(frame, f"Time remaining: {time_left:.1f}s", (20, 140), 
-                   cv2.FONT_HERSHEY_SIMPLEX, 0.7, (200, 200, 200), 2)
-                   
-    elif state == 'ACTIVE':
-        # Top Status Bar
-        cv2.rectangle(frame, (0, 0), (w, 40), (50, 50, 50), -1)
-        
-        # EAR and Threshold info
-        ear = debug_info.get('ear', 0.0)
-        thresh = debug_info.get('threshold', EAR_THRESHOLD_DEFAULT)
-        cv2.putText(frame, f"EAR: {ear:.2f} | Thresh: {thresh:.2f}", (10, 25), 
-                   cv2.FONT_HERSHEY_SIMPLEX, 0.6, (200, 200, 200), 1)
-        
-        # Blink Status
-        if debug_info.get('blinking', False):
-            cv2.circle(frame, (w - 30, 20), 10, (0, 0, 255), -1) # Red dot for blink
-        else:
-             cv2.circle(frame, (w - 30, 20), 10, (0, 255, 0), -1) # Green dot for open
-             
-        # Decoding Info
-        # Current Signal
-        signal = decoder_data.get('current_signals', '')
-        cv2.putText(frame, f"Signal:: {signal}", (10, 80), 
-                   cv2.FONT_HERSHEY_SIMPLEX, 1.0, (0, 255, 255), 2)
-                   
-        # Current Word
-        curr_word = decoder_data.get('current_word', '')
-        cv2.putText(frame, f"Building: {curr_word}", (10, 120), 
-                   cv2.FONT_HERSHEY_SIMPLEX, 0.8, (100, 255, 100), 2)
-        
-        # Full Sentence (in bottom panel)
-        sentence = decoder_data.get('sentence', '')
-        # Simple text wrapping or scrolling
-        display_text = sentence[-50:] # Show last 50 chars
-        cv2.putText(frame, display_text, (10, h - 40), 
-                   cv2.FONT_HERSHEY_SIMPLEX, 0.8, (255, 255, 255), 2)
+from calibration import Calibrator
+from ui_overlay import draw_calibration_ui, draw_mode_selection_ui, draw_active_ui
+from modes import PATIENT_MODE, MORSE_MODE, CALIBRATION, MODE_SELECTION
 
 def main():
+    # 1. Initialize Components
     detector = BlinkDetector()
     decoder = MorseDecoder()
     tts = TTSEngine()
+    calibrator = Calibrator()
     
+    # 2. Camera Setup
+    # Force High Resolution
+    CAM_WIDTH = 1280
+    CAM_HEIGHT = 720
     cap = cv2.VideoCapture(CAMERA_ID)
-    cap.set(cv2.CAP_PROP_FRAME_WIDTH, FRAME_WIDTH)
-    cap.set(cv2.CAP_PROP_FRAME_HEIGHT, FRAME_HEIGHT)
+    cap.set(cv2.CAP_PROP_FRAME_WIDTH, CAM_WIDTH)
+    cap.set(cv2.CAP_PROP_FRAME_HEIGHT, CAM_HEIGHT)
+    
+    # UI Canvas Constants
+    CANVAS_WIDTH = 1920
+    CANVAS_HEIGHT = 1080
     
     if not cap.isOpened():
         print("Error: Could not open camera.")
         return
 
-    # Calibration State
-    calibration_active = True
-    calibration_start_time = time.time()
-    calibration_ears = []
+    # 3. System State
+    current_state = CALIBRATION
+    calibrator.start()
     
-    # Operational Constants (will be updated after calibration)
+    # Runtime Variables
     current_ear_threshold = EAR_THRESHOLD_DEFAULT
-    
-    # Runtime State
     blink_start_time = 0
     blinking = False
     last_blink_end_time = time.time()
     blink_counter = 0
     
-    print("System Started. Entering Calibration...")
-    tts.speak("Calibration starting. Please look at the camera and blink naturally.")
+    # Mode-Specific Buffers
+    morse_buffer = ""
+    
+    # Mode Switch Safety
+    last_mode_switch_time = 0
+    WARMUP_DELAY = 0.5 
+    
+    # Timing State Tracking
+    gap_state = "NONE" # NONE, SYMBOL_GAP, LETTER_GAP, WORD_GAP
+    
+    tts.speak("Welcome. Starting calibration.")
 
     while True:
         ret, frame = cap.read()
         if not ret:
             break
             
-        # 1. Processing
-        left_ear, right_ear, landmarks = detector.process_frame(frame)
+        # Create dedicated Canvas
+        canvas = np.zeros((CANVAS_HEIGHT, CANVAS_WIDTH, 3), dtype=np.uint8)
+        
+        # Resize frame if needed to fit our slot (optional safety)
+        fh, fw, _ = frame.shape
+        limit_h = min(fh, CANVAS_HEIGHT)
+        limit_w = min(fw, CANVAS_WIDTH)
+        canvas[0:limit_h, 0:limit_w] = frame[0:limit_h, 0:limit_w]
+            
+        # ---------------------------------------------------------
+        # COMMON PROCESSING
+        # ---------------------------------------------------------
+        left_ear, right_ear, landmarks, blink_event = detector.process_frame(frame, current_ear_threshold)
         avg_ear = (left_ear + right_ear) / 2.0
         current_time = time.time()
         
-        # Draw Landmarks (Subtle)
-        if len(landmarks) > 0:
-            for (x, y) in landmarks:
-                cv2.circle(frame, (x, y), 1, (0, 255, 0), -1)
+        # Check Warmup Delay
+        if current_time - last_mode_switch_time < WARMUP_DELAY:
+            blink_event = None # Suppress all input during warmup
+        
+        # Draw Landmarks (Canvas)
+        for (x, y) in landmarks:
+             cv2.circle(canvas, (x, y), 1, (0, 255, 0), -1)
 
         # ---------------------------------------------------------
-        # MODE: CALIBRATION
+        # STATE MACHINE
         # ---------------------------------------------------------
-        if calibration_active:
-            elapsed = current_time - calibration_start_time
-            remaining = CALIBRATION_DURATION - elapsed
+        
+        if current_state == CALIBRATION:
+            calibrator.update(avg_ear)
+            draw_calibration_ui(canvas, calibrator)
             
-            if remaining > 0:
-                calibration_ears.append(avg_ear)
-                draw_ui(frame, 'CALIBRATION', {'time_left': remaining}, {})
-            else:
-                # Calibration Done
-                if len(calibration_ears) > 10:
-                    # Simple heuristic: 
-                    # 5th percentile as "closed eyes" (approx) or min
-                    # 95th percentile as "open eyes"
-                    # Threshold = Average of those, or slightly lower than "open"
-                    
-                    cal_array = np.array(calibration_ears)
-                    # Filter out zeros (failed detection)
-                    cal_array = cal_array[cal_array > 0.0]
-                    
-                    if len(cal_array) > 0:
-                        min_ear = np.min(cal_array) 
-                        max_ear = np.max(cal_array)
-                        mean_ear = np.mean(cal_array)
-                        
-                        # A better heuristic for blinks:
-                        # Blinks are outliers at the bottom.
-                        # We want a threshold that catches them.
-                        # Usually threshold ~ 0.2 - 0.25.
-                        # Let's set it at (min + mean) / 2? Or (min + max) / 2?
-                        # Standard EAR paper suggests ~0.3 for open, ~0.2 or less for closed.
-                        # Let's try: 
-                        # current_ear_threshold = min_ear + 0.05 # Conservative
-                        # OR mean - std_dev?
-                        
-                        # Let's use a safe fallback if variance is low
-                        target_thresh = (min_ear + mean_ear) / 2.0
-                        
-                        # Safety checks
-                        if target_thresh < 0.15: target_thresh = 0.15
-                        if target_thresh > 0.35: target_thresh = 0.35
-                        
-                        current_ear_threshold = target_thresh
-                        print(f"Calibration Complete. New Threshold: {current_ear_threshold:.3f}")
-                        tts.speak("Calibration complete.")
-                    else:
-                        print("Calibration failed (no eyes?), using default.")
+            if not calibrator.is_calibrating:
+                current_ear_threshold = calibrator.get_threshold()
+                current_state = MODE_SELECTION
+                tts.speak("Calibration done. Select mode.")
                 
-                calibration_active = False
-                last_blink_end_time = time.time() # Reset timers
-
-        # ---------------------------------------------------------
-        # MODE: ACTIVE
-        # ---------------------------------------------------------
-        else:
-            # Blink Detection
-            if avg_ear < current_ear_threshold:
-                blink_counter += 1
-            else:
-                # Eye is open
-                if blink_counter >= BLINK_CONSEC_FRAMES:
-                    # Blink Logic
-                    blink_duration = current_time - blink_start_time
-                    
-                    signal = "." if blink_duration < DOT_DURATION_THRESHOLD else "-"
-                    decoder.add_signal(signal)
-                    last_blink_end_time = current_time
-                    
-                blink_counter = 0
+        elif current_state == MODE_SELECTION:
+            draw_mode_selection_ui(canvas)
+            # Key Handling is below
+            
+        elif current_state == PATIENT_MODE:
+            # ---------------------------
+            # STRICT PATIENT MODE TIMING
+            # ---------------------------
+            # Rule: Accumulate symbols -> Decode ONLY on WORD GAP (2.5s)
+            
+            if blink_event:
+                symbol = "." if blink_event.duration < DOT_DURATION_THRESHOLD else "-"
+                decoder.add_signal(symbol) 
+                last_blink_end_time = blink_event.end_time
                 blinking = False
+                
+            blinking = detector.is_closed
             
-            # Start of blink
-            if blink_counter == 1:
-                blink_start_time = current_time
-                blinking = True
-                
-            # Pause / Timeout Logic
-            if not blinking:
-                time_since_last_blink = current_time - last_blink_end_time
-                
-                if decoder.current_sequence and time_since_last_blink > LETTER_PAUSE_THRESHOLD:
-                    decoder.decode_sequence()
-                    
-                if decoder.current_word and time_since_last_blink > WORD_PAUSE_THRESHOLD:
-                    word = decoder.complete_word()
-                    if word:
-                        print(f"Speaking: {word}")
-                        tts.speak(word)
-                        
-            # UI Updates
-            debug_info = {
+            # Gap Analysis
+            time_since_last = current_time - last_blink_end_time
+            
+            # Identify Gap State
+            if time_since_last >= WORD_PAUSE_THRESHOLD:
+                # WORD GAP Reached -> Commit Sequence
+                if decoder.current_sequence:
+                     # For Patient Mode, sequence IS the word identifier
+                     word = decoder.decode_sequence()
+                     if word:
+                         print(f"Patient Command: {word}")
+                         tts.speak(word)
+                         decoder.complete_word() # Flush buffer
+                     else:
+                         # Invalid sequence, still flush to reset
+                         decoder.reset()
+            
+            # UI Update
+            debug_data = {
                 'ear': avg_ear,
                 'threshold': current_ear_threshold,
                 'blinking': blinking
             }
-            draw_ui(frame, 'ACTIVE', debug_info, decoder.get_display_text())
+            draw_active_ui(canvas, current_state, debug_data, decoder.get_display_text())
 
-        # Display
-        cv2.imshow("Blink Morse AI", frame)
-        
-        # Input Handling
-        key = cv2.waitKey(1) & 0xFF
-        if key == 27: # Esc
-            break
-        elif key == ord('r'): # Reset
-            decoder.reset()
-            calibration_active = True # Allow re-calibration
-            calibration_start_time = time.time()
-            calibration_ears = []
-            print("Resetting...")
-        elif key == ord('c'): # Force Calibrate
-            calibration_active = True
-            calibration_start_time = time.time()
-            calibration_ears = []
+        elif current_state == MORSE_MODE:
+            # ---------------------------
+            # STRICT MORSE MODE TIMING
+            # ---------------------------
+            # Rules:
+            # 1. Accumulate symbols in local buffer
+            # 2. Local Buffer -> Decoder on LETTER GAP (1.0s)
+            # 3. Decoder -> Speak on WORD GAP (2.5s)
             
+            if blink_event:
+                 symbol = "." if blink_event.duration < DOT_DURATION_THRESHOLD else "-"
+                 morse_buffer += symbol
+                 last_blink_end_time = blink_event.end_time
+                 blinking = False
+            
+            blinking = detector.is_closed
+            
+            # Gap Analysis
+            gap_duration = current_time - last_blink_end_time
+            
+            # 1. WORD GAP CHECK (Highest Priority)
+            if not blinking and gap_duration >= WORD_PAUSE_THRESHOLD:
+                # "Decode any pending symbol buffer"
+                if morse_buffer:
+                    for s in morse_buffer: 
+                        decoder.add_signal(s)
+                    decoder.decode_sequence()
+                    morse_buffer = ""
+                
+                # Finalize Word
+                if decoder.current_word:
+                    word = decoder.complete_word()
+                    if word:
+                        print(f"Speaking Morse: {word}")
+                        tts.speak(word)
+                        
+            # 2. LETTER GAP CHECK
+            elif not blinking and morse_buffer and gap_duration >= LETTER_PAUSE_THRESHOLD:
+                # Commit local buffer to decoder
+                for s in morse_buffer:
+                    decoder.add_signal(s)
+                decoder.decode_sequence() # E.g. ".." -> "I"
+                morse_buffer = "" # Clear local
+
+            # UI Update
+            ui_data = decoder.get_display_text()
+            if morse_buffer:
+                ui_data['current_signals'] = morse_buffer
+            
+            debug_data = {
+                'ear': avg_ear,
+                'threshold': current_ear_threshold,
+                'blinking': blinking
+            }
+            draw_active_ui(canvas, current_state, debug_data, ui_data)
+
+        # ---------------------------------------------------------
+        # DISPLAY & INPUT
+        # ---------------------------------------------------------
+        cv2.imshow("Blink Morse AI", canvas)
+        
+        key = cv2.waitKey(1) & 0xFF
+        
+        if key == 27: # ESC
+            break
+            
+        # Global Reset
+        if key == ord('c'):
+            print("Force Calibration")
+            current_state = CALIBRATION
+            calibrator.start()
+            decoder.reset()
+            morse_buffer = ""
+            
+        # Mode Switching with HARD RESET
+        new_mode = None
+        if current_state == MODE_SELECTION:
+            if key == ord('p'):
+                new_mode = PATIENT_MODE
+                tts.speak("Patient Mode Active")
+            elif key == ord('m'):
+                new_mode = MORSE_MODE
+                tts.speak("Morse Mode Active")
+        
+        # While in Active mode, allow switching back to menu
+        if key == ord('\t'): 
+             current_state = MODE_SELECTION
+             tts.speak("Select mode")
+             # Reset Everything on exit too
+             decoder.reset()
+             morse_buffer = ""
+             
+        if new_mode:
+            current_state = new_mode
+            decoder.set_mode(new_mode)
+            # HARD RESET STATE
+            morse_buffer = ""
+            decoder.reset()
+            last_mode_switch_time = time.time()
+            # Also reset blink timers so we don't trigger immediate gaps
+            last_blink_end_time = time.time() 
+
+    # Cleanup
     cap.release()
     cv2.destroyAllWindows()
     tts.stop()
